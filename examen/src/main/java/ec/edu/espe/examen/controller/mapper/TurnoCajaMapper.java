@@ -9,8 +9,8 @@ import java.util.UUID;
 public class TurnoCajaMapper {
 
     public static TurnoCaja fromAbrirTurnoDTO(AbrirTurnoDTO dto) {
-        String codigoTurno = dto.getCodigoCaja() + dto.getCodigoCajero() +
-                LocalDateTime.now().toLocalDate().toString().replace("-", "");
+        String fechaFormateada = LocalDateTime.now().toLocalDate().toString().replace("-", "");
+        String codigoTurno = dto.getCodigoCaja() + "-" + dto.getCodigoCajero() + "-" + fechaFormateada;
 
         double montoInicial = dto.getDetalleInicial().stream()
                 .mapToDouble(d -> d.getDenominacion().getValor() * d.getCantidad()).sum();
@@ -26,4 +26,5 @@ public class TurnoCajaMapper {
                 .detalleInicial(DenominacionCantidadMapper.toEntityList(dto.getDetalleInicial()))
                 .build();
     }
+
 }
