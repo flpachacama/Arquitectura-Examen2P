@@ -1,72 +1,137 @@
 package ec.edu.espe.examen.service;
 
+import ec.edu.espe.examen.controller.mapper.DenominacionCantidadMapper;
+import ec.edu.espe.examen.controller.mapper.TransaccionTurnoMapper;
+import ec.edu.espe.examen.controller.mapper.TurnoCajaMapper;
 import ec.edu.espe.examen.enums.TipoTransaccionEnum;
-import ec.edu.espe.examen.model.DenominacionCantidad;
-import ec.edu.espe.examen.model.TransaccionTurno;
-import ec.edu.espe.examen.model.TurnoCaja;
-import ec.edu.espe.examen.repository.TransaccionTurnoRepository;
-import ec.edu.espe.examen.repository.TurnoCajaRepository;
+import ec.edu.espe.examen.exception.*;
+import ec.edu.espe.examen.model.*;
+import ec.edu.espe.examen.repository.*;
+import ec.edu.espe.examen.controller.dto.*;
+
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.List;
 
+@Slf4j
 @Service
 public class VentanillaService {
-    @Autowired
-    private TurnoCajaRepository turnoRepo;
-    @Autowired
-    private TransaccionTurnoRepository transaccionRepo;
 
-    public TurnoCaja iniciarTurno(String codigoCaja, String codigoCajero, List<DenominacionCantidad> detalleInicial) {
-        String codigoTurno = codigoCaja + codigoCajero + LocalDateTime.now().toLocalDate().toString().replace("-", "");
-        double montoInicial = detalleInicial.stream()
-                .mapToDouble(d -> d.getDenominacion().getValor() * d.getCantidad()).sum();
-        TurnoCaja turno = TurnoCaja.builder()
-                .codigoCaja(codigoCaja)
-                .codigoCajero(codigoCajero)
-                .codigoTurno(codigoTurno)
-                .inicioTurno(LocalDateTime.now())
-                .montoInicial(montoInicial)
-                .estado("ABIERTO")
-                .detalleInicial(detalleInicial)
-                .build();
-        return turnoRepo.save(turno);
+    private final TurnoCajaRepository turnoRepo;
+    private final TransaccionTurnoRepository transaccionRepo;
+
+    public VentanillaService(TurnoCajaRepository turnoRepo, TransaccionTurnoRepository transaccionRepo) {
+        this.turnoRepo = turnoRepo;
+        this.transaccionRepo = transaccionRepo;
     }
 
-    public TransaccionTurno procesarTransaccion(String codigoTurno, TipoTransaccionEnum tipo, List<DenominacionCantidad> detalles) {
-        double monto = detalles.stream()
-                .mapToDouble(d -> d.getDenominacion().getValor() * d.getCantidad()).sum();
-        TurnoCaja turno = turnoRepo.findByCodigoTurno(codigoTurno).orElseThrow();
-        TransaccionTurno trx = TransaccionTurno.builder()
-                .codigoTurno(codigoTurno)
-                .codigoCaja(turno.getCodigoCaja())
-                .codigoCajero(turno.getCodigoCajero())
-                .tipoTransaccion(tipo)
-                .fecha(LocalDateTime.now())
-                .montoTotal(monto)
-                .denominaciones(detalles)
-                .build();
-        return transaccionRepo.save(trx);
+    public TurnoCaja abrirTurno(AbrirTurnoDTO dto) {
+        log.info("Intentando abrir turno para caja={} cajero={}", dto.getCodigoCaja(), dto.getCodigoCajero());
+
+        if (dto.getDetalleInicial() == null || dto.getDetalleInicial().isEmpty()) {
+            throw new VentanillaException("Debe especificar al menos una denominación al abrir el turno.", 2001);
+        }
+
+        boolean yaAbierto = turnoRepo
+                .findByCodigoCajaAndCodigoCajeroAndEstado(dto.getCodigoCaja(), dto.getCodigoCajero(), "ABIERTO")
+                .isPresent();
+
+        if (yaAbierto) {
+            throw new TurnoYaAbiertoException(dto.getCodigoCajero());
+        }
+
+        dto.getDetalleInicial().forEach(d -> {
+            if (d.getCantidad() <= 0) {
+                throw new VentanillaException("La cantidad de billetes debe ser mayor a cero. Denominación: " + d.getDenominacion(), 2002);
+            }
+        });
+
+        TurnoCaja turno = TurnoCajaMapper.fromAbrirTurnoDTO(dto);
+        TurnoCaja saved = turnoRepo.save(turno);
+
+        log.info("Turno abierto: {}", saved.getCodigoTurno());
+        return saved;
     }
 
-    public TurnoCaja cerrarTurno(String codigoTurno, List<DenominacionCantidad> detalleFinal) {
-        TurnoCaja turno = turnoRepo.findByCodigoTurno(codigoTurno).orElseThrow();
+    public TransaccionTurno procesarTransaccion(ProcesarTransaccionDTO dto) {
+        log.info("Procesando transacción {} para turno {}", dto.getTipo(), dto.getCodigoTurno());
+
+        if (dto.getDetalle() == null || dto.getDetalle().isEmpty()) {
+            throw new VentanillaException("El detalle de la transacción no puede estar vacío.", 2003);
+        }
+
+        dto.getDetalle().forEach(d -> {
+            if (d.getCantidad() <= 0) {
+                throw new VentanillaException("La cantidad de billetes debe ser mayor a cero. Denominación: " + d.getDenominacion(), 2004);
+            }
+        });
+
+        TurnoCaja turno = turnoRepo.findByCodigoTurno(dto.getCodigoTurno())
+                .orElseThrow(() -> new TurnoNoEncontradoException(dto.getCodigoTurno()));
+
+        if ("CERRADO".equalsIgnoreCase(turno.getEstado())) {
+            throw new TurnoYaCerradoException(dto.getCodigoTurno());
+        }
+
+        TransaccionTurno trx = TransaccionTurnoMapper.fromDTO(dto, turno);
+        TransaccionTurno saved = transaccionRepo.save(trx);
+
+        log.info("Transacción registrada: ID={}, monto=${}", saved.getId(), saved.getMontoTotal());
+        return saved;
+    }
+
+    public TurnoCaja cerrarTurno(CerrarTurnoDTO dto) {
+        log.info("Cerrando turno {}", dto.getCodigoTurno());
+
+        if (dto.getDetalleFinal() == null || dto.getDetalleFinal().isEmpty()) {
+            throw new VentanillaException("Debe ingresar el detalle final de billetes para cerrar el turno.", 2005);
+        }
+
+        dto.getDetalleFinal().forEach(d -> {
+            if (d.getCantidad() < 0) {
+                throw new VentanillaException("La cantidad de billetes no puede ser negativa. Denominación: " + d.getDenominacion(), 2006);
+            }
+        });
+
+        TurnoCaja turno = turnoRepo.findByCodigoTurno(dto.getCodigoTurno())
+                .orElseThrow(() -> new TurnoNoEncontradoException(dto.getCodigoTurno()));
+
+        if ("CERRADO".equalsIgnoreCase(turno.getEstado())) {
+            throw new TurnoYaCerradoException(dto.getCodigoTurno());
+        }
+
+        List<DenominacionCantidad> detalleFinal = DenominacionCantidadMapper.toEntityList(dto.getDetalleFinal());
+
         double montoFinal = detalleFinal.stream()
-                .mapToDouble(d -> d.getDenominacion().getValor() * d.getCantidad()).sum();
-        List<TransaccionTurno> transacciones = transaccionRepo.findByCodigoTurno(codigoTurno);
+                .mapToDouble(d -> d.getDenominacion().getValor() * d.getCantidad())
+                .sum();
+
+        List<TransaccionTurno> transacciones = transaccionRepo.findByCodigoTurno(dto.getCodigoTurno());
+
         double montoEsperado = turno.getMontoInicial();
         for (TransaccionTurno trx : transacciones) {
-            montoEsperado += trx.getTipoTransaccion() == TipoTransaccionEnum.DEPOSITO ? trx.getMontoTotal() : -trx.getMontoTotal();
+            if (trx.getTipoTransaccion() == TipoTransaccionEnum.DEPOSITO) {
+                montoEsperado += trx.getMontoTotal();
+            } else if (trx.getTipoTransaccion() == TipoTransaccionEnum.RETIRO) {
+                montoEsperado -= trx.getMontoTotal();
+            }
         }
+
         if (Math.abs(montoEsperado - montoFinal) > 0.01) {
-            System.out.println("[ALERTA] Diferencia de monto al cerrar turno.");
+            log.error("Inconsistencia al cerrar turno {}. Esperado: {}, Declarado: {}", dto.getCodigoTurno(), montoEsperado, montoFinal);
+            throw new MontoFinalInconsistenteException(montoEsperado, montoFinal);
         }
+
+        turno.setDetalleFinal(detalleFinal);
         turno.setMontoFinal(montoFinal);
         turno.setFinTurno(LocalDateTime.now());
-        turno.setDetalleFinal(detalleFinal);
         turno.setEstado("CERRADO");
-        return turnoRepo.save(turno);
+
+        TurnoCaja cerrado = turnoRepo.save(turno);
+        log.info("Turno cerrado correctamente: {}", cerrado.getCodigoTurno());
+        return cerrado;
     }
 }

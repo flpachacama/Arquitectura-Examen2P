@@ -7,4 +7,5 @@ import java.util.Optional;
 
 public interface TurnoCajaRepository extends MongoRepository<TurnoCaja, String> {
     Optional<TurnoCaja> findByCodigoTurno(String codigoTurno);
+    Optional<TurnoCaja> findByCodigoCajaAndCodigoCajeroAndEstado(String codigoCaja, String codigoCajero, String estado);
 }
